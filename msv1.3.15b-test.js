@@ -1,7 +1,3 @@
-
-
-/* ======= bootstrap-1315b.js ======= */
-
 /* MultiSource 1.3.15b Test — Android / LG webOS single JS entrypoint.
  * Loads the exact original 1.3.15 AutoCapture Lab from the published URL when
  * not already present. The existing 1.3.15 core remains unmodified.
@@ -10,7 +6,7 @@
 (function (root) {
   'use strict';
   var BASE='https://gorodinskyv-cmyk.github.io/MultiSource/lampa-multisource-v1.3.15.js';
-  var boot={version:'1.3.15b-test',core:'checking',coreUrl:BASE,coreLoadError:'',started:Date.now()};
+  var boot={version:'1.3.15b.2-diagnostic',core:'checking',coreUrl:BASE,coreLoadError:'',started:Date.now()};
   root.MultiSource1315b={diagnostic:function(){return {
     version:boot.version,core:boot.core,coreLoadError:boot.coreLoadError,
     sources:root.MultiSourceSources1315b ? root.MultiSourceSources1315b.diagnostic() : null,
@@ -32,8 +28,6 @@
 })(window);
 
 
-/* ======= sources-1315b.js ======= */
-
 /* MultiSource 1.3.15b — Android/webOS Eneyida and UaKinoCX provider registrations.
  * Additive 1.3.15b module: existing source registrations are NEVER removed.
  * Implementation based on publicly documented HTML structures of Eneyida and UaKinoCX.
@@ -42,10 +36,13 @@
 (function (root) {
   'use strict';
   if (root.MultiSourceSources1315b && root.MultiSourceSources1315b.installed) return;
-  var VERSION = '1.3.15b-test';
+  var VERSION = '1.3.15b.2-diagnostic';
   var supported = { eneyida: 'https://eneyida.tv', uakinocx: 'https://uakino.cx' };
   var stats = {version:VERSION, installed:false, eneyida:'waiting', uakinocx:'waiting',
-    lastError:'', lastTransport:'', lastSearch:'', lastStreams:0, lastPlayers:0};
+    lastError:'', lastTransport:'', lastSearch:'', lastStreams:0, lastPlayers:0,
+    lastStage:'idle', lastHost:'', lastMethod:'', lastHtmlLength:0,
+    eneyidaSearches:0, uakinocxSearches:0, attempts:[], lastProvider:'',
+    lastRawSearchCards:0};
   var seq = 0;
 
   function safeUrl(text, base, allowed) {
@@ -151,48 +148,138 @@
       root.postMessage({channel:'multisource:extra:request',id:id,url:url,method:method||'GET',form:form||null},location.origin);
     });
   }
-  function htmlRequest(api,url,method,form) {
-    method=method||'GET';
-    var accepted = ['eneyida.tv','uakino.cx','hdvbua.pro','tortuga.tw','tortuga.wtf'];
-    if(!safeUrl(url,undefined,accepted))return Promise.reject(Error('Неприпустимий домен HTML'));
-    // On Chrome use an opt-in extension so that native Lampa CORS does not
-    // block ordinary publisher HTML. On TV/mobile retain native request flow.
-    var onChrome=/^https:\/\/cf\.lampa\.mx$/i.test(location.origin);
-    if(onChrome) return chromeHtml(url,method,form).then(function(v){stats.lastTransport='chrome-html';return v;});
-    if(method==='GET') return api.request(url).then(function(v){stats.lastTransport='native';return v;});
-    // POST is necessary on Eneyida. Try native request in compatible Lampa apps.
+  function shortError(err) {
+    if (err && typeof err === 'object') {
+      if (err.status) return 'HTTP ' + err.status + (err.statusText ? ' ' + err.statusText : '');
+      if (err.message) return String(err.message).slice(0,160);
+    }
+    return String(err || 'Невідома мережева помилка').slice(0,160);
+  }
+  function htmlBody(data) {
+    // Different Lampa versions return a string or a native HTTP envelope.
+    if (typeof data === 'string') return data;
+    if (data && typeof data.body === 'string') return data.body;
+    if (data && typeof data.responseText === 'string') return data.responseText;
+    if (data && typeof data.data === 'string') return data.data;
+    if (data && typeof data.html === 'string') return data.html;
+    throw Error('Не отримано текст HTML (тип: ' + typeof data + ')');
+  }
+  function record(transport, method, url, ok, message, length) {
+    var host='';try{host=new URL(url).hostname;}catch(_){}
+    stats.lastHost=host;stats.lastMethod=method;
+    stats.lastTransport=transport;
+    if(length !== undefined)stats.lastHtmlLength=length;
+    var event={host:host,method:method,via:transport,ok:!!ok};
+    if(message)event.error=String(message).slice(0,140);
+    if(length !== undefined)event.length=length;
+    stats.attempts.push(event);
+    if(stats.attempts.length>12)stats.attempts.shift();
+  }
+  function validPage(html) {
+    // A 200 challenge page isn't a successful HTML content response.
+    if (!html || !/<(?:html|body|article|div|main|section|iframe)\b/i.test(html)) throw Error('HTML порожній або невідомого типу');
+    if (/Just a moment\.\.\.|Checking your browser before accessing|cf-chl-|challenge-platform/i.test(html))
+      throw Error('Сторінка захисту сайту замість пошукового HTML');
+    return html;
+  }
+  function nativeHtml(url, method, form) {
     return new Promise(function(resolve,reject){
-      if (!root.Lampa || !Lampa.Reguest) return reject(Error('Native POST unavailable'));
+      if (!root.Lampa || typeof Lampa.Reguest !== 'function') return reject(Error('Lampa.Reguest відсутній'));
+      var req, settled=false;
+      function finish(err,data){if(settled)return;settled=true;err?reject(err):resolve(data);}
       try {
-        var r=new Lampa.Reguest(); if(r.timeout)r.timeout(15000);
-        r.native(url,resolve,function(){reject(Error('Native POST failed'));},false,
-          {type:'POST',method:'POST',data:form,dataType:'text'});
-      } catch (err){reject(err);}
+        req=new Lampa.Reguest();
+        if(req.timeout)req.timeout(14000);
+        if(typeof req.native!=='function')return finish(Error('Lampa.Reguest.native відсутній'));
+        var postData= method==='POST' ? Object.keys(form||{}).map(function(key){
+          return encodeURIComponent(key)+'='+encodeURIComponent(String(form[key]));
+        }).join('&') : false;
+        // Lampa.native signature is (url, success, error, post_data, options).
+        // The Android native implementation chooses POST based on post_data,
+        // NOT on options.data/type alone.
+        var options={dataType:'text'};
+        if(method==='POST') {
+          options.type='POST';
+          options.headers={'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'};
+        }
+        req.native(url, function(data){finish(null,data);},function(err){finish(Error(shortError(err)));},postData,options);
+      }catch(e){finish(e);}
     });
   }
-  function searchCards(html, base, kind, movie) {
-    var d=doc(html), out=[];
-    var cards=d.querySelectorAll(kind==='eneyida'?'article.short':'.grid-items__item, .item');
-    for(var i=0;i<cards.length && out.length<100;i++){
-      var el=cards[i], a=el.querySelector(kind==='eneyida'?'a.short_title':'a.item__title, .item__title');
-      if(!a)continue;
-      var title=text(a), url=safeUrl(a.getAttribute('href') || (a.closest('a')&&a.closest('a').getAttribute('href')),base,[new URL(base).hostname]);
-      if(!title||!url||!/\.html(?:[?#]|$)/.test(url))continue;
-      var pic=el.querySelector(kind==='eneyida'?'a.short_img img':'img');
-      var img=pic && (pic.getAttribute('data-src')||pic.getAttribute('src'));
-      var item={title:title,url:url,poster:safeUrl(img,base),year:year(el.textContent),score:0};
-      item.score=score(item,movie);if(item.score)out.push(item);
+  function htmlRequest(api,url,method,form) {
+    method=method||'GET';
+    var accepted=['eneyida.tv','uakino.cx','hdvbua.pro','tortuga.tw','tortuga.wtf'];
+    if(!safeUrl(url,undefined,accepted))return Promise.reject(Error('Неприпустимий домен HTML'));
+    // Chrome remains opt-in only; Android/webOS do not need the Chrome extension.
+    var onChrome=/^https:\/\/cf\.lampa\.mx$/i.test(location.origin);
+    var paths=[];
+    if(onChrome)paths=[{label:'chrome-html',run:function(){return chromeHtml(url,method,form);}}];
+    else if(method==='POST'){
+      paths=[{label:'native-post',run:function(){return nativeHtml(url,method,form);}}];
+    } else {
+      // Keep existing core request as first attempt, add native fallback.
+      if(api && typeof api.request==='function')paths.push({label:'core-request',run:function(){return api.request(url);}});
+      paths.push({label:'native-get',run:function(){return nativeHtml(url,method,form);}});
     }
-    return out;
+    var lastError=null;
+    function next(index) {
+      if(index>=paths.length)return Promise.reject(lastError || Error('Запит не виконано'));
+      var path=paths[index];
+      return Promise.resolve().then(path.run).then(function(data){
+        var page=validPage(htmlBody(data));
+        record(path.label,method,url,true,'',page.length);
+        return page;
+      }).catch(function(err){
+        lastError=err;
+        record(path.label,method,url,false,shortError(err));
+        return next(index+1);
+      });
+    }
+    return next(0);
+  }
+  function searchCards(html, base, kind, movie) {
+    var d=doc(html), out=[], seen=Object.create(null);
+    var cards=d.querySelectorAll(kind==='eneyida'?
+      'article.short, .short, .shortstory, .story':' .grid-items__item, .item, .poster, .shortstory, article');
+    function pushCandidate(a, context) {
+      if(!a)return;
+      var link=a.getAttribute('href') || (a.closest && a.closest('a') && a.closest('a').getAttribute('href'));
+      var url=safeUrl(link,base,[new URL(base).hostname]);
+      if(!url || !/\.html(?:[?#]|$)/i.test(url) || seen[url])return;
+      var title=text(a)||String(a.getAttribute('title')||'').trim();
+      if(!title) {
+        var heading=context && context.querySelector('h2,h3,h4,.title,.item__title,.short_title');
+        title=text(heading);
+      }
+      if(!title)return;
+      var pic=context && context.querySelector('img');
+      var img=pic && (pic.getAttribute('data-src')||pic.getAttribute('data-original')||pic.getAttribute('src'));
+      var item={title:title,url:url,poster:safeUrl(img,base),year:year(context && context.textContent),score:0};
+      item.score=score(item,movie);
+      if(item.score){seen[url]=true;out.push(item);}
+    }
+    for(var i=0;i<cards.length && i<160;i++){
+      var el=cards[i];
+      var a=el.querySelector(kind==='eneyida'? 'a.short_title, a[href*=".html"]': 'a.item__title, a[href*=".html"]');
+      pushCandidate(a,el);
+    }
+    // Fallback for newer DLE layouts without the historic CSS card classes.
+    if(out.length===0){
+      var links=d.querySelectorAll('a[href*=".html"]');
+      for(var j=0;j<links.length && j<500;j++)pushCandidate(links[j],links[j].parentElement||links[j]);
+    }
+    stats.lastRawSearchCards=cards.length;
+    return out.slice(0,60);
   }
   function searchProvider(movie,api,kind) {
-    movie=movie||{};
+    movie=movie||{}; stats.lastProvider=kind;stats.lastStage='search';stats.lastError='';
+    stats[kind+'Searches']++;
     var base=supported[kind], queries=bestQueries(movie); if(!queries.length)return Promise.resolve([]);
     var success=0, failures=[];
     return Promise.all(queries.map(function(q){
       var u=kind==='eneyida'?base:base+'/index.php?do=search&subaction=search&story='+encodeURIComponent(q);
       var post=kind==='eneyida';
-      var form=post?{do:'search',subaction:'search',story:q.replace(/ /g,'+')}:null;
+      var form=post?{do:'search',subaction:'search',story:q}:null;
       return htmlRequest(api,u,post?'POST':'GET',form)
         .catch(function(err){
           if (!post) throw err;
@@ -203,15 +290,16 @@
         .catch(function(err){failures.push(err);stats.lastError=kind+' search: '+err.message;return [];});
     })).then(function(lists){
       if(!success)throw failures[0] || Error('Джерело не відповіло');
+      stats.lastStage='search-complete';
       var out=dedup([].concat.apply([],lists),function(x){return x.url;}).sort(function(a,b){return b.score-a.score;}).slice(0,30);
       stats.lastSearch=kind+': '+out.length;
+      if(!out.length && !stats.lastError)stats.lastError=kind+': HTML отримано, але збігів за назвою не знайдено (карток: '+stats.lastRawSearchCards+')';
       return out;
     });
   }
   function getFrames(page,base,kind) {
     var d=doc(page), list=[];
-    var selector=kind==='eneyida'?'.tabs_b.visible iframe[src],.tabs_b iframe[src]':
-      'iframe[src],iframe[data-src],[data-player],[data-iframe]';
+    var selector='iframe[src], iframe[data-src], [data-player], [data-iframe]';
     Array.prototype.forEach.call(d.querySelectorAll(selector),function(node){
       ['src','data-src','data-player','data-iframe'].forEach(function(key){
         var u=safeUrl(node.getAttribute(key),base);
@@ -260,18 +348,26 @@
     return streams;
   }
   function getStreamsProvider(item,api,kind){
+    stats.lastProvider=kind;stats.lastStage='detail';stats.lastError='';
     var base=supported[kind],url=safeUrl(item&&item.url,undefined,[new URL(base).hostname]);
     if(!url||!/\.html(?:[?#]|$)/.test(url))return Promise.reject(Error('Некоректна адреса сторінки'));
     return htmlRequest(api,url).then(function(html){
       var frames=getFrames(html,base,kind);
       stats.lastPlayers=frames.length;
-      if(!frames.length)return {streams:[],embeds:[],pageUrl:url,notice:'Сторінка не містить розпізнаного відеоплеєра.'};
+      if(!frames.length){
+        // Some pages initialize PlayerJS directly rather than inside iframe.
+        var scripts=Array.prototype.map.call(doc(html).querySelectorAll('script'),function(x){return x.textContent||'';}).join('\n');
+        var direct=flatten(readFile(scripts),url,kind);
+        if(kind==='eneyida')expandEneyidaMovieChoices(direct);
+        stats.lastStreams=direct.length;stats.lastStage='detail-without-iframe';
+        return {streams:direct,embeds:[],pageUrl:url,notice:direct.length?'Потік зі скрипта сторінки.':'Плеєр не знайдено або його HTML не містить відкритого потоку.'};
+      }
       return Promise.all(frames.map(function(frame){
         return streamsFromPlayer(api,frame,kind).catch(function(err){stats.lastError=kind+' player: '+err.message;return [];});
       })).then(function(found){
         var streams=dedup([].concat.apply([],found),function(x){return [x.url,x.voice,x.season,x.episode].join('|');});
         if (kind==='eneyida') expandEneyidaMovieChoices(streams);
-        stats.lastStreams=streams.length;
+        stats.lastStreams=streams.length;stats.lastStage='streams-complete';
         return {streams:streams,embeds:[],pageUrl:url,notice:streams.length?'HLS отримано з відкритої конфігурації плеєра. Перевіряйте його доступність у Lampa.':
           'Виявлено '+frames.length+' сторінок плеєра, але прямого HLS немає. Вебплеєр не відкриваємо.'};
       });
@@ -293,7 +389,7 @@
   root.MultiSourceSources1315b={version:VERSION,installed:false,
     diagnostic:function(){return Object.assign({},stats);},install:install,
     // Pure functions exported only to verify parsing with synthetic fixtures.
-    _test:{readFile:readFile,flatten:flatten,searchCards:searchCards,getFrames:getFrames,normal:normal,expandEneyidaMovieChoices:expandEneyidaMovieChoices}};
+    _test:{readFile:readFile,flatten:flatten,searchCards:searchCards,getFrames:getFrames,normal:normal,expandEneyidaMovieChoices:expandEneyidaMovieChoices,htmlRequest:htmlRequest,nativeHtml:nativeHtml,htmlBody:htmlBody,validPage:validPage}};
   if(install())root.MultiSourceSources1315b.installed=true;
   else {
     var attempts=0,timer=setInterval(function(){
@@ -304,7 +400,115 @@
 })(window);
 
 
-/* ======= focus-return-1315b.js ======= */
+/* MultiSource 1.3.15b Back Navigation Lab — works only inside the MultiSource activity.
+ * Never intercepts global Back keys. Provides an additional focusable Back button and
+ * delegates to the most recently registered MultiSource 'content' back handler.
+ */
+(function (root) {
+  'use strict';
+  if (root.MultiSourceBack1315b) return;
+  var COMPONENT = 'multi_source_online_v1';
+  var st = {version:'1.3.15b',booted:false,button:false,invoked:0,lastRoute:'idle',lastError:'',captureCount:0};
+  var originalAdd = null, currentBack = null, observer = null, timer = 0, attempts = 0;
+  function active() {
+    try {
+      var a = root.Lampa.Activity.active();
+      return !!(a && (a.component || (a.object && a.object.component) || (a.activity && a.activity.component)) === COMPONENT);
+    } catch (_) { return false; }
+  }
+  function viewport() {
+    return root.document.querySelector('.ms-scroll-viewport');
+  }
+  function playerOpen() {
+    try { return root.Lampa.Player && typeof root.Lampa.Player.opened === 'function' && root.Lampa.Player.opened(); }
+    catch (_) { return false; }
+  }
+  function overlayOpen() {
+    try {
+      return !!((root.Lampa.Select && typeof root.Lampa.Select.opened === 'function' && root.Lampa.Select.opened()) ||
+        (root.Lampa.Modal && typeof root.Lampa.Modal.opened === 'function' && root.Lampa.Modal.opened()));
+    } catch (_) { return false; }
+  }
+  function back() {
+    if (!active()) return st.lastRoute='outside-multisource';
+    if (playerOpen() || overlayOpen()) return st.lastRoute='player-or-overlay-open';
+    try {
+      var focused = root.document.activeElement;
+      if (focused && focused.tagName === 'IFRAME' && focused.blur) focused.blur();
+      // Restore the regular Lampa content collection, never create a second controller.
+      if (root.Lampa.Controller && root.Lampa.Controller.toggle) root.Lampa.Controller.toggle('content');
+      if (currentBack) { currentBack(); st.lastRoute='core-content-back'; }
+      else if (root.Lampa.Activity && root.Lampa.Activity.backward) { root.Lampa.Activity.backward(); st.lastRoute='activity-backward'; }
+      else return st.lastRoute='no-back-handler';
+      st.invoked++;
+      return st.lastRoute;
+    } catch(err) { st.lastError=String(err && err.message || err).slice(0,140);return st.lastRoute='exception'; }
+  }
+  function attach() {
+    if (!active() || playerOpen() || overlayOpen()) return;
+    var rootView = viewport();
+    if (!rootView || !root.document.documentElement.contains(rootView)) return;
+    if (rootView.querySelector('.ms-1315b-back')) { st.button=true; return; }
+    var el=root.document.createElement('div');
+    el.className='ms-1315b-back selector';
+    el.tabIndex=0;
+    el.setAttribute('role','button');
+    el.setAttribute('aria-label','Назад');
+    el.style.cssText='display:inline-flex;align-items:center;gap:.4em;padding:.45em .85em;'+
+      'margin:0 0 .65em 0;border:1px solid rgba(255,255,255,.28);'+
+      'border-radius:.45em;cursor:pointer;color:inherit;max-width:fit-content;'+
+      'background:rgba(120,130,150,.12)';
+    el.textContent='‹  Назад';
+    el.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();back();});
+    el.addEventListener('keydown',function(e){
+      if(e.key==='Enter'||e.key===' ') {e.preventDefault();e.stopPropagation();back();}
+    });
+    if (root.jQuery) root.jQuery(el).on('hover:enter',function(){back();});
+    rootView.insertBefore(el,rootView.firstChild);
+    st.button=true;
+    // Include this selector in the standard remote-control navigation collection.
+    try { if(root.Lampa.Controller && root.Lampa.Controller.toggle && !playerOpen())
+      root.Lampa.Controller.toggle('content'); } catch(_) {}
+  }
+  function refresh() {
+    if(timer) root.clearTimeout(timer);
+    timer=root.setTimeout(function(){timer=0;attach();},120);
+  }
+  function boot() {
+    attempts++;
+    if (!root.Lampa || !root.LampaMultiSource || !root.LampaMultiSource._coreLoaded ||
+        !root.Lampa.Controller || typeof root.Lampa.Controller.add!=='function' ||
+        !root.Lampa.Activity || !root.document || !root.document.body) {
+      if(attempts<220)root.setTimeout(boot,400);
+      else st.lastRoute='bootstrap-timeout';
+      return;
+    }
+    var controller=root.Lampa.Controller;
+    originalAdd=controller.add;
+    controller.add=function(name,handlers){
+      if(name==='content' && active() && handlers && typeof handlers.back==='function') {
+        var fn=handlers.back;
+        currentBack=function(){ return fn.call(handlers); };
+        st.captureCount++;
+      }
+      return originalAdd.apply(this,arguments);
+    };
+    st.booted=true;
+    if (root.MutationObserver) {
+      observer=new root.MutationObserver(refresh);
+      observer.observe(root.document.body,{childList:true,subtree:true});
+    }
+    refresh();
+  }
+  root.MultiSourceBack1315b={diagnostic:function(){return {
+    version:st.version,booted:st.booted,button:st.button,invoked:st.invoked,
+    lastRoute:st.lastRoute,lastError:st.lastError,captureCount:st.captureCount,
+    active:active(),controller:root.Lampa && root.Lampa.Controller &&
+      root.Lampa.Controller.enabled ? (root.Lampa.Controller.enabled()||{}).name||'' : ''
+  };},back:back};
+  boot();
+})(window);
+
 
 /*
  * MultiSource Focus Return Lab v0.1 (Android / webOS + Lampa internal player)
@@ -447,115 +651,3 @@
   };
   boot();
 })();
-
-
-/* ======= back-navigation-1315b.js ======= */
-
-/* MultiSource 1.3.15b Back Navigation Lab — works only inside the MultiSource activity.
- * Never intercepts global Back keys. Provides an additional focusable Back button and
- * delegates to the most recently registered MultiSource 'content' back handler.
- */
-(function (root) {
-  'use strict';
-  if (root.MultiSourceBack1315b) return;
-  var COMPONENT = 'multi_source_online_v1';
-  var st = {version:'1.3.15b',booted:false,button:false,invoked:0,lastRoute:'idle',lastError:'',captureCount:0};
-  var originalAdd = null, currentBack = null, observer = null, timer = 0, attempts = 0;
-  function active() {
-    try {
-      var a = root.Lampa.Activity.active();
-      return !!(a && (a.component || (a.object && a.object.component) || (a.activity && a.activity.component)) === COMPONENT);
-    } catch (_) { return false; }
-  }
-  function viewport() {
-    return root.document.querySelector('.ms-scroll-viewport');
-  }
-  function playerOpen() {
-    try { return root.Lampa.Player && typeof root.Lampa.Player.opened === 'function' && root.Lampa.Player.opened(); }
-    catch (_) { return false; }
-  }
-  function overlayOpen() {
-    try {
-      return !!((root.Lampa.Select && typeof root.Lampa.Select.opened === 'function' && root.Lampa.Select.opened()) ||
-        (root.Lampa.Modal && typeof root.Lampa.Modal.opened === 'function' && root.Lampa.Modal.opened()));
-    } catch (_) { return false; }
-  }
-  function back() {
-    if (!active()) return st.lastRoute='outside-multisource';
-    if (playerOpen() || overlayOpen()) return st.lastRoute='player-or-overlay-open';
-    try {
-      var focused = root.document.activeElement;
-      if (focused && focused.tagName === 'IFRAME' && focused.blur) focused.blur();
-      // Restore the regular Lampa content collection, never create a second controller.
-      if (root.Lampa.Controller && root.Lampa.Controller.toggle) root.Lampa.Controller.toggle('content');
-      if (currentBack) { currentBack(); st.lastRoute='core-content-back'; }
-      else if (root.Lampa.Activity && root.Lampa.Activity.backward) { root.Lampa.Activity.backward(); st.lastRoute='activity-backward'; }
-      else return st.lastRoute='no-back-handler';
-      st.invoked++;
-      return st.lastRoute;
-    } catch(err) { st.lastError=String(err && err.message || err).slice(0,140);return st.lastRoute='exception'; }
-  }
-  function attach() {
-    if (!active() || playerOpen() || overlayOpen()) return;
-    var rootView = viewport();
-    if (!rootView || !root.document.documentElement.contains(rootView)) return;
-    if (rootView.querySelector('.ms-1315b-back')) { st.button=true; return; }
-    var el=root.document.createElement('div');
-    el.className='ms-1315b-back selector';
-    el.tabIndex=0;
-    el.setAttribute('role','button');
-    el.setAttribute('aria-label','Назад');
-    el.style.cssText='display:inline-flex;align-items:center;gap:.4em;padding:.45em .85em;'+
-      'margin:0 0 .65em 0;border:1px solid rgba(255,255,255,.28);'+
-      'border-radius:.45em;cursor:pointer;color:inherit;max-width:fit-content;'+
-      'background:rgba(120,130,150,.12)';
-    el.textContent='‹  Назад';
-    el.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();back();});
-    el.addEventListener('keydown',function(e){
-      if(e.key==='Enter'||e.key===' ') {e.preventDefault();e.stopPropagation();back();}
-    });
-    if (root.jQuery) root.jQuery(el).on('hover:enter',function(){back();});
-    rootView.insertBefore(el,rootView.firstChild);
-    st.button=true;
-    // Include this selector in the standard remote-control navigation collection.
-    try { if(root.Lampa.Controller && root.Lampa.Controller.toggle && !playerOpen())
-      root.Lampa.Controller.toggle('content'); } catch(_) {}
-  }
-  function refresh() {
-    if(timer) root.clearTimeout(timer);
-    timer=root.setTimeout(function(){timer=0;attach();},120);
-  }
-  function boot() {
-    attempts++;
-    if (!root.Lampa || !root.LampaMultiSource || !root.LampaMultiSource._coreLoaded ||
-        !root.Lampa.Controller || typeof root.Lampa.Controller.add!=='function' ||
-        !root.Lampa.Activity || !root.document || !root.document.body) {
-      if(attempts<220)root.setTimeout(boot,400);
-      else st.lastRoute='bootstrap-timeout';
-      return;
-    }
-    var controller=root.Lampa.Controller;
-    originalAdd=controller.add;
-    controller.add=function(name,handlers){
-      if(name==='content' && active() && handlers && typeof handlers.back==='function') {
-        var fn=handlers.back;
-        currentBack=function(){ return fn.call(handlers); };
-        st.captureCount++;
-      }
-      return originalAdd.apply(this,arguments);
-    };
-    st.booted=true;
-    if (root.MutationObserver) {
-      observer=new root.MutationObserver(refresh);
-      observer.observe(root.document.body,{childList:true,subtree:true});
-    }
-    refresh();
-  }
-  root.MultiSourceBack1315b={diagnostic:function(){return {
-    version:st.version,booted:st.booted,button:st.button,invoked:st.invoked,
-    lastRoute:st.lastRoute,lastError:st.lastError,captureCount:st.captureCount,
-    active:active(),controller:root.Lampa && root.Lampa.Controller &&
-      root.Lampa.Controller.enabled ? (root.Lampa.Controller.enabled()||{}).name||'' : ''
-  };},back:back};
-  boot();
-})(window);

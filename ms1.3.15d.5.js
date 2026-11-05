@@ -1590,7 +1590,7 @@
   var VERSION = '1.3.15d.5-private-worker-transport-test';
   var ID = 'uakinobest', HOST = 'https://uakino.best';
   // Optional: paste the URL of YOUR DEPLOYED Worker for Android without a console.
-  var DEFAULT_WORKER = ''; // e.g. https://multisource-uakinobest.<your-account>.workers.dev
+  var DEFAULT_WORKER = 'https://uakinobest.gorodinsky-v.workers.dev/'; // e.g. https://multisource-uakinobest.<your-account>.workers.dev
   var config = { worker: '', fallback: true, inspectAshdi: true };
   var stat = {
     version: VERSION, installed: false, stage: 'waiting-core', disabledLift: false,

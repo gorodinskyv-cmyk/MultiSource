@@ -2203,6 +2203,7 @@
   seasonRequests:0,seasonsFound:0,episodesFound:0,renderedEpisodes:0,selectedSeason:0,selectedEpisode:0,
   episodeRequests:0,episodeResponses:0,playerFrames:0,playerRequests:0,playerResponses:0,
   streamsFound:0,renderedStreams:0,launches:0,lastProvider:'',lastFormat:'',lastError:'',
+  autoLaunchAttempts:0,autoLaunchSuccess:0,autoLaunchFailures:0,autoLaunchProvider:'',autoLaunchStatus:'idle',
   lastNotice:'',ui:'idle',baseVersion:'',playerInvoked:false,cardLayout:'core-ms-episode-card',timelineAttached:false,watchedMarks:0,metadataSeason:0,metadataStatus:'idle',metadataRecords:0,progressRefreshed:0};
  var series=null,session=0,installTimer=null,observer=null,drawTimer=null,lastLaunch=0;
  var registry=null;
@@ -2504,7 +2505,7 @@
   copy.appendChild(element('div','ms-episode-number','Сезон '+ep.season+'  •  Серія '+ep.episode));
   var title=clean(ep.title),isGeneric=!title||/^серія\s*\d+$/i.test(title);
   copy.appendChild(element('div','ms-episode-name',isGeneric?'Серія '+ep.episode:title));
-  copy.appendChild(element('div','ms-episode-voice',ep.upcoming?'Очікується':'UAFix · Вибір потоку після відкриття серії'));
+  copy.appendChild(element('div','ms-episode-voice',ep.upcoming?'Очікується':'UAFix · Натисніть для відтворення'));
   var desc=element('div','ms-episode-description');desc.style.display='none';copy.appendChild(desc);
   var progress=element('div','ms-episode-progress');
   var track=element('div','ms-episode-progress-track');track.appendChild(element('div','ms-episode-progress-fill'));
@@ -2596,13 +2597,35 @@
   pendingFocusKey='';if(series.phase==='episodes')decorateSeason(series.season);return true;
  }
  function schedule(){if(drawTimer||!root.setTimeout)return;drawTimer=root.setTimeout(function(){drawTimer=null;draw();},80);}
+ // For a TV episode, one card action resolves public candidates and launches a stream.
+ // Keep the stream-card screen as an emergency fallback only if Player.play fails.
+ function defaultStreamIndex(streams){
+  for(var i=0;i<streams.length;i++)if(streams[i].provider==='Zetvideo')return i;
+  for(var j=0;j<streams.length;j++)if(streams[j].provider==='Ashdi')return j;
+  return 0;
+ }
  function openEpisode(ep){if(!series||ep.upcoming)return;var key=series.token,request=series.requestId=(series.requestId||0)+1;
-  series.episode=ep;series.streams=[];series.phase='loading';state.ui='loading';state.lastError='';pendingFocusKey='back';
+  series.episode=ep;series.streams=[];series.phase='loading';state.ui='loading';state.lastError='';pendingFocusKey='episode:'+ep.season+':'+ep.episode;
+  state.autoLaunchStatus='resolving';state.autoLaunchProvider='';
   state.playerFrames=0;state.playerRequests=0;state.playerResponses=0;state.streamsFound=0;schedule();
   resolveEpisode(ep).then(function(streams){if(!series||series.token!==key||series.requestId!==request)return;
-   series.streams=streams;series.phase=streams.length?'streams':'error';state.ui=series.phase;pendingFocusKey=streams.length?'stream:0':'back';schedule();
+   series.streams=streams;
+   if(!streams.length){series.phase='error';state.ui='error';state.autoLaunchStatus='no-stream';schedule();return;}
+   var chosen=defaultStreamIndex(streams);state.autoLaunchAttempts++;state.autoLaunchProvider=streams[chosen].provider;
+   // launchStream reuses the verified movie/episode Lampa.Player integration and Timeline identity.
+   series.phase='streams';state.ui='auto-launching';
+   if(launchStream(chosen)){
+    state.autoLaunchSuccess++;state.autoLaunchStatus='player-invoked';
+    // Return directly to the episode list when the player closes; no intermediate provider cards.
+    series.phase='episodes';series.streams=[];state.renderedStreams=0;
+    pendingFocusKey='episode:'+ep.season+':'+ep.episode;
+   }else{
+    state.autoLaunchFailures++;state.autoLaunchStatus='manual-fallback';
+    series.phase='streams';state.ui='streams';pendingFocusKey='stream:'+chosen;schedule();
+   }
   },function(e){if(!series||series.token!==key||series.requestId!==request)return;state.lastError=errorText(e);
-   state.lastNotice='Не вдалося отримати сторінку епізоду.';series.phase='error';state.ui='error';schedule();});}
+   state.autoLaunchStatus='resolver-error';state.lastNotice='Не вдалося отримати сторінку епізоду.';
+   series.phase='error';state.ui='error';schedule();});}
  function launchStream(index){if(!series||series.phase!=='streams'||!selectedUafix())return false;
   var s=series.streams[index],l=root.Lampa;if(!s||!l||!l.Player||typeof l.Player.play!=='function')return false;
   if(Date.now()-lastLaunch<450)return false;lastLaunch=Date.now();
@@ -2668,7 +2691,9 @@
   episodeResponses:state.episodeResponses,playerFrames:state.playerFrames,playerRequests:state.playerRequests,
   playerResponses:state.playerResponses,streamsFound:state.streamsFound,renderedStreams:state.renderedStreams,
   launches:state.launches,lastProvider:state.lastProvider,lastFormat:state.lastFormat,lastError:state.lastError,
-  lastNotice:state.lastNotice,ui:state.ui,playerInvoked:state.playerInvoked,baseVersion:state.baseVersion,cardLayout:state.cardLayout,timelineAttached:state.timelineAttached,watchedMarks:state.watchedMarks,metadataSeason:state.metadataSeason,metadataStatus:state.metadataStatus,metadataRecords:state.metadataRecords,progressRefreshed:state.progressRefreshed};}
+  lastNotice:state.lastNotice,ui:state.ui,playerInvoked:state.playerInvoked,baseVersion:state.baseVersion,
+  autoLaunchAttempts:state.autoLaunchAttempts,autoLaunchSuccess:state.autoLaunchSuccess,autoLaunchFailures:state.autoLaunchFailures,
+  autoLaunchProvider:state.autoLaunchProvider,autoLaunchStatus:state.autoLaunchStatus,cardLayout:state.cardLayout,timelineAttached:state.timelineAttached,watchedMarks:state.watchedMarks,metadataSeason:state.metadataSeason,metadataStatus:state.metadataStatus,metadataRecords:state.metadataRecords,progressRefreshed:state.progressRefreshed};}
  function attachDiagnostic(){var s=root.MultiSourceSources1315b;if(!s||!s.diagnostic||s.diagnostic._msSeriesD139)return;
   var before=s.diagnostic;s.diagnostic=function(){var d=before.apply(this,arguments);if(d){if(!d.lastDetailEvidence)d.lastDetailEvidence={};
    var e=d.lastDetailEvidence;if(!e.sourceExpansionD13)e.sourceExpansionD13={};e.sourceExpansionD13.series=diagnostic();}
@@ -2686,7 +2711,7 @@
   api.registerSource(copy);registry=copy;state.installed=true;state.stage='ready';state.baseVersion=clean(base.version);
   installStyle();attachDiagnostic();
   try{var pl=root.Lampa&&root.Lampa.Player;if(pl&&pl.listener&&typeof pl.listener.follow==='function')
-   pl.listener.follow('close',function(){if(root.setTimeout)root.setTimeout(refreshVisibleEpisodes,330);});}catch(_){ }
+   pl.listener.follow('close',function(){if(root.setTimeout)root.setTimeout(function(){schedule();refreshVisibleEpisodes();},330);});}catch(_){ }
   if(root.MutationObserver&&root.document&&root.document.body){observer=new root.MutationObserver(function(){schedule();});
    observer.observe(root.document.body,{childList:true,subtree:true});}
   return true;
@@ -2694,7 +2719,7 @@
  root.MultiSourceUafixSeriesD139={version:VERSION,install:install,diagnostic:diagnostic,
   _test:{parseListing:parseListing,matchesCatalog:matchesCatalog,media:media,detectPlayerHtml:detectPlayerHtml,
    uniqueEpisodes:uniqueEpisodes,resolveEpisode:resolveEpisode,loadCatalog:loadCatalog,onCatalog:onCatalog,
-   openEpisode:openEpisode,launchStream:launchStream,render:draw,reset:reset,
+   openEpisode:openEpisode,launchStream:launchStream,defaultStreamIndex:defaultStreamIndex,render:draw,reset:reset,
    timelineFor:timelineFor,watchedStatus:watchedStatus,markWatched:markWatched,
    seasonMetadata:seasonMetadata,refreshVisibleEpisodes:refreshVisibleEpisodes}};
  if(!install()&&root.setInterval){var attempts=0;installTimer=root.setInterval(function(){
